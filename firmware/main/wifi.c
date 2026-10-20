@@ -13,6 +13,7 @@
  Local Include
 ===============================================================================*/
 #include "wifi.h"
+#include "esp_timer.h"
 #include "http.h"
 #include "gpio.h"
 #include "led.h"
@@ -55,6 +56,9 @@
  Local Function Declaration
 ===============================================================================*/
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+static void wifi_apply_ap_cache();
+static void wifi_apply_ip_cache();
+static void wifi_store_ip_cache(const esp_netif_ip_info_t *ip_info);
 static void wifi_time_sync_notification_cb(struct timeval *tv);
 static void stop_captive_portal_task(void *pvParameter);
 
@@ -76,6 +80,20 @@ static EventGroupHandle_t s_wifi_event_group;
 static EventGroupHandle_t ping_event_group;
 static uint8_t ap_started = 0;
 static uint8_t sta_connecting = 0;
+
+/* [maison] Cache de connexion : apres un premier DHCP reussi, on reutilise l'IP,
+ * la passerelle, le DNS, le canal et le BSSID aux cycles suivants. Plus de
+ * DISCOVER/OFFER/REQUEST/ACK a chaque envoi (pollution du syslog du routeur),
+ * et un reveil Wi-Fi plus court (economie d'energie sur le supercondensateur).
+ * Le cache vit en RAM (conservee en light sleep) et est invalide au moindre
+ * echec ; un vrai DHCP est refait toutes les WIFI_IP_CACHE_MAX_AGE_US. */
+#define WIFI_IP_CACHE_MAX_AGE_US (6LL * 3600 * 1000000)
+static esp_netif_t *sta_netif = NULL;
+static bool ip_cache_valid = false;
+static bool ip_cache_in_use = false;
+static int64_t ip_cache_time_us = 0;
+static esp_netif_ip_info_t ip_cache_info;
+static esp_netif_dns_info_t ip_cache_dns;
 
 static uint32_t ping_time_array[10];
 static uint32_t ping_index = 0;
@@ -119,6 +137,7 @@ uint8_t wifi_init()
         return 0;
     }
     esp_netif_t *netif = esp_netif_create_default_wifi_sta();
+    sta_netif = netif;
 
     err = esp_netif_set_hostname(netif, HOSTNAME);
     if (err != ESP_OK)
@@ -215,6 +234,7 @@ esp_err_t wifi_connect()
             return err;
         }
     }
+    wifi_apply_ap_cache();
     err = esp_wifi_set_config(WIFI_IF_STA, &sta_wifi_config);
     if (err != ESP_OK)
     {
@@ -242,6 +262,8 @@ esp_err_t wifi_connect()
         wifi_disconnect();
         return err;
     }
+
+    wifi_apply_ip_cache();
 
     err = esp_wifi_start();
     if (err != ESP_OK)
@@ -288,6 +310,7 @@ esp_err_t wifi_connect()
     else if (bits & WIFI_FAIL_BIT)
     {
         ESP_LOGI(TAG, "Failed to connect to SSID:%s", (char *)sta_wifi_config.sta.ssid);
+        wifi_invalidate_ip_cache();
         wifi_disconnect();
         led_start_pattern(LED_CONNECTING_FAILED);
         return ESP_FAIL;
@@ -295,6 +318,7 @@ esp_err_t wifi_connect()
     else if (bits & WIFI_AUTHFAIL_BIT)
     {
         ESP_LOGE(TAG, "Failed to connect to SSID:%s Auth fail", (char *)sta_wifi_config.sta.ssid);
+        wifi_invalidate_ip_cache();
         wifi_timeout_counter++;
         wifi_state = WIFI_FAILED;
         led_start_pattern(LED_CONNECTING_FAILED);
@@ -304,6 +328,7 @@ esp_err_t wifi_connect()
     else if (bits & WIFI_NO_AP_FOUND_BIT)
     {
         ESP_LOGE(TAG, "Failed to connect to SSID:%s No AP found", (char *)sta_wifi_config.sta.ssid);
+        wifi_invalidate_ip_cache();
         wifi_timeout_counter++;
         wifi_state = WIFI_FAILED;
         led_start_pattern(LED_CONNECTING_FAILED);
@@ -313,12 +338,85 @@ esp_err_t wifi_connect()
     else
     {
         ESP_LOGE(TAG, "Failed to connect to SSID:%s Timeout", (char *)sta_wifi_config.sta.ssid);
+        wifi_invalidate_ip_cache();
         wifi_timeout_counter++;
         wifi_state = WIFI_FAILED;
         led_start_pattern(LED_CONNECTING_FAILED);
         wifi_disconnect();
         return last_wifi_err == ESP_OK ? ESP_ERR_TIMEOUT : last_wifi_err;
     }
+}
+
+static void wifi_apply_ap_cache()
+{
+    if (ip_cache_valid && esp_timer_get_time() - ip_cache_time_us < WIFI_IP_CACHE_MAX_AGE_US)
+    {
+        return; // canal et BSSID deja dans sta_wifi_config
+    }
+    sta_wifi_config.sta.channel = 0;
+    sta_wifi_config.sta.bssid_set = false;
+}
+
+static void wifi_apply_ip_cache()
+{
+    if (sta_netif == NULL)
+    {
+        return;
+    }
+    if (ip_cache_valid && esp_timer_get_time() - ip_cache_time_us < WIFI_IP_CACHE_MAX_AGE_US)
+    {
+        esp_err_t err = esp_netif_dhcpc_stop(sta_netif);
+        if (err == ESP_OK || err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED)
+        {
+            err = esp_netif_set_ip_info(sta_netif, &ip_cache_info);
+        }
+        if (err == ESP_OK)
+        {
+            esp_netif_set_dns_info(sta_netif, ESP_NETIF_DNS_MAIN, &ip_cache_dns);
+            ip_cache_in_use = true;
+            ESP_LOGI(TAG, "IP en cache: " IPSTR " (pas de DHCP)", IP2STR(&ip_cache_info.ip));
+            return;
+        }
+        ESP_LOGW(TAG, "Cache IP inutilisable (0x%X), retour au DHCP", err);
+        ip_cache_valid = false;
+    }
+    ip_cache_in_use = false;
+    esp_err_t err = esp_netif_dhcpc_start(sta_netif);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED)
+    {
+        ESP_LOGW(TAG, "esp_netif_dhcpc_start: 0x%X", err);
+    }
+}
+
+static void wifi_store_ip_cache(const esp_netif_ip_info_t *ip_info)
+{
+    if (ip_cache_in_use || sta_netif == NULL)
+    {
+        return; // IP issue du cache : rien a mettre a jour
+    }
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK)
+    {
+        return;
+    }
+    ip_cache_info = *ip_info;
+    esp_netif_get_dns_info(sta_netif, ESP_NETIF_DNS_MAIN, &ip_cache_dns);
+    sta_wifi_config.sta.channel = ap.primary;
+    memcpy(sta_wifi_config.sta.bssid, ap.bssid, sizeof(ap.bssid));
+    sta_wifi_config.sta.bssid_set = true;
+    ip_cache_time_us = esp_timer_get_time();
+    ip_cache_valid = true;
+    ESP_LOGI(TAG, "Cache IP enregistre: " IPSTR ", canal %d", IP2STR(&ip_info->ip), ap.primary);
+}
+
+void wifi_invalidate_ip_cache()
+{
+    if (ip_cache_valid)
+    {
+        ESP_LOGW(TAG, "Cache IP invalide : DHCP et scan complets au prochain cycle");
+    }
+    ip_cache_valid = false;
+    ip_cache_in_use = false;
 }
 
 void wifi_disconnect()
@@ -409,6 +507,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ESP_LOGI(TAG, "IP:" IPSTR, IP2STR(&event->ip_info.ip));
         wifi_current_ip = event->ip_info;
         s_retry_num = 0;
+        wifi_store_ip_cache(&event->ip_info);
         wifi_state = WIFI_CONNECTED;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }

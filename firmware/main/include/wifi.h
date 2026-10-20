@@ -79,6 +79,11 @@ extern esp_err_t wifi_connect();
 extern void wifi_disconnect();
 
 /**
+ * @brief [maison] invalide le cache IP/canal : DHCP et scan complets au prochain cycle
+ */
+extern void wifi_invalidate_ip_cache();
+
+/**
  * @brief Get the Timestamp in seconds
  *
  * @return timestamp

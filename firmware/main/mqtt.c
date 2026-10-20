@@ -17,6 +17,7 @@
 #include "esp_log.h"
 
 #include "mqtt.h"
+#include "esp_timer.h"
 #include "wifi.h"
 #include "gpio.h"
 #include "led.h"
@@ -240,6 +241,27 @@ uint8_t mqtt_prepare_publish(linky_data_t *linkydata)
     // ESP_LOGI(TAG, "ha_discovery_configured = %d", mqtt_topics.ha_discovery_configured);
     if (config_values.mode == MODE_MQTT_HA)
     {
+        /* [maison] La decouverte n'etait publiee qu'une fois par demarrage : un
+         * message perdu (Wi-Fi coupe juste apres) n'etait jamais renvoye, d'ou
+         * des capteurs absents dans HA (HCHC/HCHP) ou perimes (BBR Tempo).
+         * On republie toute la decouverte toutes les 12 h. */
+        static int64_t last_full_discovery_us = 0;
+        if (last_full_discovery_us == 0 || esp_timer_get_time() - last_full_discovery_us > 12LL * 3600 * 1000000)
+        {
+            for (int i = 0; i < linky_label_list_size; i++)
+            {
+                linky_value_rw_t *rw = linky_get_value_rw(i);
+                if (rw)
+                {
+                    rw->reported = HA_REPORT_STATE_UNKNOWN;
+                }
+            }
+            last_full_discovery_us = esp_timer_get_time();
+            if (last_full_discovery_us == 0)
+            {
+                last_full_discovery_us = 1;
+            }
+        }
         mqtt_setup_ha_discovery(true);
     }
 

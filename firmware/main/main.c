@@ -306,6 +306,7 @@ void main_task(void *pvParameters)
     {
       err_count++;
       ESP_LOGE(MAIN_TAG, "Data send failed %ld times", err_count);
+      wifi_invalidate_ip_cache(); // [maison] IP/canal peut-etre perimes : DHCP complet au prochain cycle
       if (err_count > 10)
       {
         ESP_LOGE(MAIN_TAG, "Too many errors, rebooting");
@@ -488,6 +489,10 @@ static void main_ota_check()
     next_update_check = MILLIS + 2 * 60 * 1000; // 2 minutes
   }
 
+#if !CONFIG_TICMETER_OTA_CHECK
+  // [maison] pas de verification de mise a jour aupres de GammaTroniques/GitHub
+  return;
+#endif
   if (next_update_check < MILLIS)
   {
     ota_version_t version;
