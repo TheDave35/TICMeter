@@ -92,6 +92,10 @@ unsigned int main_data_index = 0;
 /*==============================================================================
 Function Implementation
 ===============================================================================*/
+static uint16_t main_vcondo_mv();
+static void main_diag_store_ms(uint16_t *dst, int64_t us);
+static void main_diag_reset_reason();
+
 void app_main(void)
 {
   esp_err_t err;
@@ -105,6 +109,7 @@ void app_main(void)
   }
 
   gpio_init_pins();
+  main_diag_reset_reason(); // [maison]
 
   while (!gpio_vusb_connected() && gpio_get_vcondo() < MAIN_BOOT_VOLTAGE_THRESHOLD)
   {
@@ -261,6 +266,32 @@ void app_main(void)
   esp_pm_lock_release(main_init_lock);
 }
 
+/* [maison] Outils de diagnostic */
+static uint16_t main_vcondo_mv()
+{
+  float v = gpio_get_vcondo();
+  return (v > 0 && v < 60) ? (uint16_t)(v * 1000) : UINT16_MAX;
+}
+
+static void main_diag_store_ms(uint16_t *dst, int64_t us)
+{
+  int64_t ms = us / 1000;
+  *dst = ms > 65000 ? 65000 : (uint16_t)ms;
+}
+
+static void main_diag_reset_reason()
+{
+  static const char *const names[] = {
+      [ESP_RST_UNKNOWN] = "inconnu", [ESP_RST_POWERON] = "alimentation", [ESP_RST_EXT] = "externe",
+      [ESP_RST_SW] = "logiciel", [ESP_RST_PANIC] = "plantage", [ESP_RST_INT_WDT] = "watchdog int",
+      [ESP_RST_TASK_WDT] = "watchdog tache", [ESP_RST_WDT] = "watchdog", [ESP_RST_DEEPSLEEP] = "deep sleep",
+      [ESP_RST_BROWNOUT] = "sous-tension", [ESP_RST_SDIO] = "sdio",
+  };
+  esp_reset_reason_t r = esp_reset_reason();
+  const char *name = (r < sizeof(names) / sizeof(names[0]) && names[r]) ? names[r] : "autre";
+  strncpy(linky_diag.reset_reason, name, sizeof(linky_diag.reset_reason) - 1);
+}
+
 void main_task(void *pvParameters)
 {
   ESP_LOGI(MAIN_TAG, "Starting fetch linky data task");
@@ -289,6 +320,7 @@ void main_task(void *pvParameters)
     gpio_peripheral_reinit();
     ESP_LOGI(MAIN_TAG, "-----------------------------------------------------------------");
     ESP_LOGI(MAIN_TAG, "Waking up, VCondo: %f", gpio_get_vcondo());
+    linky_diag.vcondo_wake_mv = main_vcondo_mv(); // [maison]
 
     if (!linky_update(LINKY_READING_TIMEOUT) /* || !linky_presence()*/)
     {
@@ -299,12 +331,16 @@ void main_task(void *pvParameters)
     esp_pm_lock_acquire(main_init_lock);
     linky_print();
     linky_stats();
+    // [maison] diagnostic : trames rejetees (compteur remis a zero a chaque lecture) et depassement
+    linky_diag.tic_errors += linky_decode_checksum_error;
+    linky_diag.adps = (linky_mode == MODE_HIST && linky_data.hist.ADPS != UINT16_MAX && linky_data.hist.ADPS != 0) ? 1 : 0;
 
     // esp_pm_dump_locks(stdout);
     err = main_send_data(&linky_data);
     if (err != ESP_OK)
     {
       err_count++;
+      linky_diag.send_failures++; // [maison]
       ESP_LOGE(MAIN_TAG, "Data send failed %ld times", err_count);
       wifi_invalidate_ip_cache(); // [maison] IP/canal peut-etre perimes : DHCP complet au prochain cycle
       if (err_count > 10)
@@ -381,11 +417,18 @@ esp_err_t main_send_data(linky_data_t *data)
     {
       ESP_LOGE(MAIN_TAG, "Some data will not be sent, but we continue");
     }
+    int64_t t_start = esp_timer_get_time(); // [maison] diagnostic : publie au cycle suivant
     ret = wifi_connect();
+    main_diag_store_ms(&linky_diag.wifi_ms, esp_timer_get_time() - t_start);
     if (ret != ESP_OK)
     {
       ESP_LOGE(MAIN_TAG, "Wifi connection failed");
       goto send_error;
+    }
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
+    {
+      linky_diag.rssi = (uint16_t)(int16_t)ap_info.rssi;
     }
     ESP_LOGI(MAIN_TAG, "Sending data to MQTT");
     ret = mqtt_send();
@@ -398,11 +441,15 @@ esp_err_t main_send_data(linky_data_t *data)
     main_ota_check();
     vTaskDelay(100 / portTICK_PERIOD_MS);
     wifi_disconnect();
+    main_diag_store_ms(&linky_diag.send_ms, esp_timer_get_time() - t_start);
+    linky_diag.vcondo_end_mv = main_vcondo_mv();
     led_start_pattern(LED_SEND_OK);
     break;
 
   send_error:
     wifi_disconnect();
+    main_diag_store_ms(&linky_diag.send_ms, esp_timer_get_time() - t_start);
+    linky_diag.vcondo_end_mv = main_vcondo_mv();
     led_start_pattern(LED_SEND_FAILED);
     err = ESP_FAIL;
     break;

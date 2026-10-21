@@ -213,10 +213,17 @@ static void mqtt_create_sensor(char *json, char *config_topic, linky_value_t sen
     case POWER_kW:
     case CURRENT:
     case TENSION:
+    case TENSION_MV:
+    case SIGNAL_DBM:
+    case DURATION_MS:
         cJSON_AddStringToObject(sensorConfig, "stat_cla", "measurement");
         break;
     default:
         break;
+    }
+    if (strncmp(sensor.label, "diag-", 5) == 0)
+    {
+        cJSON_AddStringToObject(sensorConfig, "ent_cat", "diagnostic"); // [maison]
     }
 
     cJSON_AddItemToObject(sensorConfig, "dev", jsonDevice);
@@ -371,6 +378,10 @@ uint8_t mqtt_prepare_publish(linky_data_t *linkydata)
             {
                 snprintf(strValue, sizeof(strValue), "Monophasé");
             }
+        }
+        else if (linky_label_list[i].data == &linky_diag.rssi)
+        {
+            snprintf(strValue, sizeof(strValue), "%d", (int16_t)linky_diag.rssi); // [maison] dBm negatif
         }
         else if (linky_label_list[i].device_class == TIME_M)
         {

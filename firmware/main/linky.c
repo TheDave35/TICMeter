@@ -260,6 +260,16 @@ const linky_value_t linky_label_list[] =
     {124, 106, "Mode Electrique",                    "mode-elec",   &linky_three_phase,            UINT16,       0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  NONE_CLASS,  "mdi:power-plug-outline",              0xFF42, 0x002a,  ZB_RO, ZB_UINT8     },
     {125, 104, "Temps de fonctionnement",            "uptime",      &linky_data.uptime,            UINT64,       0,      ANY,  C_ANY,   G_ANY,  REAL_TIME,     TIME_M,      "mdi:clock-time-eight-outline",        0xFF42, 0x002d,  ZB_RO, ZB_UINT48    },
     {126, 000, "Mise à jour disponible",             "update",      &ota_available,                UINT8,        0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  CLASS_BOOL,  "mdi:download",                        0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    //--------------------------- [maison] Diagnostic ------------------------------------------------
+    {130, 000, "Supercondensateur au réveil",        "diag-vcondo",       &linky_diag.vcondo_wake_mv, UINT16,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  TENSION_MV,  "mdi:battery-charging",                0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {131, 000, "Supercondensateur après envoi",      "diag-vcondo-fin",   &linky_diag.vcondo_end_mv,  UINT16,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  TENSION_MV,  "mdi:battery-arrow-down",              0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {132, 000, "Signal Wi-Fi",                       "diag-rssi",         &linky_diag.rssi,           UINT16,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  SIGNAL_DBM,      "mdi:wifi",                            0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {133, 000, "Durée connexion Wi-Fi",              "diag-wifi-ms",      &linky_diag.wifi_ms,        UINT16,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  DURATION_MS,     "mdi:timer-outline",                   0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {134, 000, "Durée envoi",                        "diag-envoi-ms",     &linky_diag.send_ms,        UINT16,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  DURATION_MS,     "mdi:timer-outline",                   0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {135, 000, "Trames TIC rejetées",                "diag-erreurs-tic",  &linky_diag.tic_errors,     UINT32,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  NONE_CLASS,  "mdi:alert-circle-outline",            0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {136, 000, "Envois échoués",                     "diag-echecs-envoi", &linky_diag.send_failures,  UINT32,  0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  NONE_CLASS,  "mdi:send-clock-outline",              0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {137, 000, "Cause du dernier démarrage",         "diag-reset",        &linky_diag.reset_reason,   STRING, 16,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  NONE_CLASS,  "mdi:restart",                         0x0000, 0x0000,  ZB_NO, ZB_NO        },
+    {138, 000, "Dépassement puissance souscrite",    "adps-actif",        &linky_diag.adps,           UINT8,   0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  CLASS_BOOL,  "mdi:flash-alert",                     0x0000, 0x0000,  ZB_NO, ZB_NO        },
  // {127, 000, "Dernière actualisation",             "timestamp",   &linky_data.timestamp,         UINT64,       0,      ANY,  C_ANY,   G_ANY,  STATIC_VALUE,  TIMESTAMP,   "",                                    0x0000, 0x0000,  ZB_NO, ZB_NO        },
  // {128, 000, "Free RAM",                           "free-ram",    &linky_free_heap_size,         UINT32,       0,      ANY,  C_ANY,   G_ANY,  REAL_TIME,     BYTES,       "",                                    0x0000, 0x0000,  ZB_NO, ZB_NO        },
 
@@ -269,7 +279,11 @@ const int32_t linky_label_list_size = sizeof(linky_label_list) / sizeof(linky_la
 
 linky_value_rw_t linky_rw_values[sizeof(linky_label_list) / sizeof(linky_label_list[0])] = {0};
 
-const void *linky_protected_data[] = {&config_values.refresh_rate, &linky_mode, &linky_three_phase, &ota_available};
+linky_diag_t linky_diag = {.rssi = UINT16_MAX, .vcondo_end_mv = UINT16_MAX, .wifi_ms = UINT16_MAX, .send_ms = UINT16_MAX};
+const void *linky_protected_data[] = {&config_values.refresh_rate, &linky_mode, &linky_three_phase, &ota_available,
+                                      &linky_diag.vcondo_wake_mv, &linky_diag.vcondo_end_mv, &linky_diag.rssi, &linky_diag.wifi_ms,
+                                      &linky_diag.send_ms, &linky_diag.tic_errors, &linky_diag.send_failures, &linky_diag.adps,
+                                      &linky_diag.reset_reason}; // [maison] diagnostic non efface a chaque lecture
 const uint8_t linky_protected_data_size = sizeof(linky_protected_data) / sizeof(linky_protected_data[0]);
 linky_data_t linky_data;        // The data
 linky_mode_t linky_mode = NONE; // The mode of the linky
@@ -295,6 +309,9 @@ const char *const HADeviceClassStr[] = {
     [TIME_M] = "duration",
     [BYTES] = "",
     [CLASS_BOOL] = "",
+    [TENSION_MV] = "voltage",
+    [SIGNAL_DBM] = "signal_strength",
+    [DURATION_MS] = "duration",
 };
 
 const char *const HAUnitsStr[] = {
@@ -314,6 +331,9 @@ const char *const HAUnitsStr[] = {
     [TIME_M] = "s",
     [CLASS_BOOL] = "",
     [BYTES] = "bytes",
+    [TENSION_MV] = "mV",
+    [SIGNAL_DBM] = "dBm",
+    [DURATION_MS] = "ms",
 };
 
 const char *const ha_sensors_str[] = {

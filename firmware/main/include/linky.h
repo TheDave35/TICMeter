@@ -282,7 +282,26 @@ typedef enum
     TIME_M, // ms
     CLASS_BOOL,
     BYTES,
+    TENSION_MV, // [maison] diagnostic
+    SIGNAL_DBM,     // [maison] dBm
+    DURATION_MS,    // [maison] duree en ms
 } HADeviceClass;
+
+/* [maison] Diagnostic publie a chaque cycle. Les mesures de connexion/envoi
+ * concernent le cycle precedent (la publication est preparee avant l'envoi). */
+typedef struct
+{
+    uint16_t vcondo_wake_mv; // tension supercondensateur au reveil
+    uint16_t vcondo_end_mv;  // apres l'envoi du cycle precedent
+    uint16_t rssi;           // int16 stocke tel quel (dBm negatif)
+    uint16_t wifi_ms;        // duree de wifi_connect
+    uint16_t send_ms;        // duree connexion + envoi MQTT
+    uint32_t tic_errors;     // trames TIC rejetees (somme de controle), cumul depuis le demarrage
+    uint32_t send_failures;  // envois echoues, cumul depuis le demarrage
+    uint8_t adps;            // 1 si depassement de puissance souscrite pendant la lecture
+    char reset_reason[16];   // cause du dernier demarrage
+} linky_diag_t;
+extern linky_diag_t linky_diag;
 
 typedef enum
 {
